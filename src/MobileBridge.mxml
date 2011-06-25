@@ -1,0 +1,214 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:WindowedApplication xmlns:fx="http://ns.adobe.com/mxml/2009" 
+					   xmlns:s="library://ns.adobe.com/flex/spark" 
+					   xmlns:mx="library://ns.adobe.com/flex/mx"
+					   xmlns:local="*" creationComplete="onCreationComplete();">
+	<fx:Script>
+		<![CDATA[
+			import mx.collections.ArrayCollection;
+			import mx.utils.Base64Decoder;
+			
+			import spark.components.CheckBox;
+			
+			[Bindable] private var deviceList:ArrayCollection;
+			private var netConnection:NetConnection;
+			private var netGroup:NetGroup;
+
+			private function onCreationComplete():void
+			{
+				browser.addEventListener(Event.LOCATION_CHANGE, onLocationChange);
+				browser.addEventListener(Event.COMPLETE, onLoadComplete);
+				this.deviceList = new ArrayCollection();
+				this.setupNetConnection();
+			}
+			
+			private function setupNetConnection():void
+			{
+				this.netConnection = new NetConnection();
+				this.netConnection.addEventListener(NetStatusEvent.NET_STATUS, onNetStatus);
+				this.netConnection.connect("rtmfp:");
+			}
+			
+			private function onNetStatus(e:NetStatusEvent):void
+			{
+				switch(e.info.code)
+				{
+					case "NetConnection.Connect.Success":
+						this.setUpGroup();
+						break;
+					case "NetGroup.Connect.Success":
+						// NetGroup successfully set up.
+						break;
+					case "NetGroup.Neighbor.Connect":
+						// e.info.peerID is the peer  ID of the neighbor
+						break;
+					case "NetGroup.Neighbor.Disconnect":
+						// e.info.peerID is the peer  ID of the neighbor that dropped
+						this.removeDevice(e.info.peerID);
+						break;
+					case "NetGroup.Posting.Notify":
+						var message:Object = e.info.message;
+						if (message.type == "init")
+						{
+							this.deviceList.addItem({deviceName:message.deviceName, peerId:message.peerId, autoLaunch:false});
+						}
+						else if (message.type == "screenshot-response")
+						{
+							var base64:String = message.data;
+							var decoder:Base64Decoder = new Base64Decoder();
+							decoder.decode(base64);
+							var bytes:ByteArray = decoder.drain();
+							this.displayScreenshot(bytes);
+						}
+						break;
+				}
+			}
+			
+			private function removeDevice(peerId:String):void
+			{
+				for (var i:uint = 0; i < this.deviceList.length; ++i)
+				{
+					if (this.deviceList.getItemAt(i).peerId == peerId)
+					{
+						this.deviceList.removeItemAt(i);
+						break;
+					}
+				}
+			}
+			
+			private function setUpGroup():void
+			{
+				var groupspec:GroupSpecifier = new GroupSpecifier("MobileBridge");
+				groupspec.postingEnabled = true;
+				groupspec.ipMulticastMemberUpdatesEnabled = true;
+				groupspec.addIPMulticastAddress("225.225.0.1:30000");
+				this.netGroup = new NetGroup(this.netConnection, groupspec.groupspecWithAuthorizations());
+				this.netGroup.addEventListener(NetStatusEvent.NET_STATUS, onNetStatus);
+			}
+			
+			private function onLocationChange(e:Event):void
+			{
+				trace("onLocationChange");
+				this.status = "Loading " + browser.locationBar.text;
+			}
+			
+			private function onLoadComplete(e:Event):void
+			{
+				trace("onLoadComplete");
+				status = "Done";
+				var device:Object;
+				for (var i:uint = 0; i < this.deviceList.length; ++i)
+				{
+					device = this.deviceList.getItemAt(i);
+					if (device.autoLaunch)
+					{
+						this.onLaunchRequest(device.peerId);
+					}
+				}
+			}
+			
+			public function onScreenshotRequest(peerId:String):void
+			{
+				var msg:Object = new Object();
+				msg.type = "screenshot-request";
+				msg.to = peerId;
+				this.sendNetworkMessage(msg);
+			}
+			
+			public function onLaunchRequest(peerId:String):void
+			{
+				var url:String = this.browser.html.location;
+				if (!url || url.length == 0) return;
+				var msg:Object = new Object();
+				msg.type = "launch";
+				msg.to = peerId;
+				msg.url = url;
+				this.sendNetworkMessage(msg);
+			}
+			
+			public function onAutoLaunchToggle(peerId:String, e:Event):void
+			{
+				for each (var device:Object in this.deviceList)
+				{
+					if (device.peerId == peerId)
+					{
+						device.autoLaunch = (e.target as CheckBox).selected;
+						break;
+					}
+				}
+			}
+			
+			private function sendNetworkMessage(message:Object):void
+			{
+				if (this.netConnection != null && this.netConnection.connected && this.netGroup != null && this.netGroup.neighborCount > 0)
+				{
+					message.time = new Date().time;
+					this.netGroup.post(message);
+				}
+			}
+			
+			private function displayScreenshot(bytes:ByteArray):void
+			{
+				var loader:Loader = new Loader();
+				loader.contentLoaderInfo.addEventListener(Event.COMPLETE, onScreenshotLoaded);
+				loader.loadBytes(bytes);
+			}
+			
+			private function onScreenshotLoaded(e:Event):void
+			{
+				var contentLoaderInfo:LoaderInfo = e.target as LoaderInfo;
+				contentLoaderInfo.removeEventListener(Event.COMPLETE, onScreenshotLoaded);
+				var winOpts:NativeWindowInitOptions = new NativeWindowInitOptions();
+				winOpts.maximizable = false;
+				winOpts.resizable = true;
+				winOpts.type = NativeWindowType.UTILITY;
+				var win:NativeWindow = new NativeWindow(winOpts);
+				win.width = contentLoaderInfo.content.width;
+				win.height = contentLoaderInfo.content.height;
+				contentLoaderInfo.content.x = 0; contentLoaderInfo.content.y = 0;
+				win.stage.align = StageAlign.TOP_LEFT;
+				win.stage.scaleMode = StageScaleMode.NO_SCALE;
+				win.stage.addChild(contentLoaderInfo.content);
+				win.activate();
+			}
+			
+		]]>
+	</fx:Script>
+	<mx:DividedBox direction="vertical" width="100%" height="100%">
+		<local:Browser id="browser" width="100%" height="80%"/>
+		<s:DataGrid width="100%" height="20%" dataProvider="{deviceList}" id="deviceDataGrid">
+			<s:columns>
+				<s:ArrayList>
+					<s:GridColumn headerText="Device" dataField="deviceName"/>
+					<s:GridColumn headerText="Screenshot" dataField="peerId" width="100">
+						<s:itemRenderer>
+							<fx:Component>
+								<s:GridItemRenderer>
+									<s:Button label="Screenshot" verticalCenter="0" horizontalCenter="0" click="outerDocument.onScreenshotRequest(data.peerId);"/>
+								</s:GridItemRenderer>
+							</fx:Component>
+						</s:itemRenderer>
+					</s:GridColumn>
+					<s:GridColumn headerText="Launch" dataField="peerId" width="100">
+						<s:itemRenderer>
+							<fx:Component>
+								<s:GridItemRenderer>
+									<s:Button label="Launch" verticalCenter="0" horizontalCenter="0" click="outerDocument.onLaunchRequest(data.peerId);"/>
+								</s:GridItemRenderer>
+							</fx:Component>
+						</s:itemRenderer>
+					</s:GridColumn>
+					<s:GridColumn headerText="Auto Launch" dataField="peerId" width="100">
+						<s:itemRenderer>
+							<fx:Component>
+								<s:GridItemRenderer>
+									<s:CheckBox change="outerDocument.onAutoLaunchToggle(data.peerId, event);" horizontalCenter="0" verticalCenter="0"/>
+								</s:GridItemRenderer>
+							</fx:Component>
+						</s:itemRenderer>
+					</s:GridColumn>
+				</s:ArrayList>
+			</s:columns>
+		</s:DataGrid>
+	</mx:DividedBox>
+</s:WindowedApplication>
